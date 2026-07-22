@@ -229,9 +229,15 @@ swift run caffeinate-ui --self-check
 in `SelfCheck.swift`, prints a result, and exits — 0 on pass, non-zero on
 failure, so it works in a git hook or CI later.
 
-Assertions use `precondition`, not `assert`. `assert` is compiled out under
-`-O`, which would make the self-check silently vacuous in the release build that
-`bundle.sh` produces.
+A third route was tried later and also fails: `swift-testing` as an SPM source
+dependency cannot compile its C++ internals against the CLT headers
+(`fatal error: 'atomic' file not found`).
+
+The checks run through a small in-repo `TestRunner`: each case is named, all
+cases run even after one fails, and `runSelfCheck()` returns a `Bool` that
+`main.swift` maps to the exit code. `assert` is never used — it is compiled out
+under `-O`, which would make the release self-check vacuous. The harness uses
+ordinary comparisons, which `-O` cannot strip.
 
 Coverage is the two pure functions plus the one controller path that reaches no
 subprocess; a running child is never exercised.

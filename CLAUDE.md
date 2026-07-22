@@ -18,11 +18,16 @@ open build/caffeinate-ui.app         # launch the bundled app
 
 **This machine has Command Line Tools, not Xcode.** `xcodebuild` and `.xcodeproj` are unavailable, and — critically — **there is no test framework**: both `import XCTest` and `import Testing` fail with `no such module`, because both ship inside Xcode. `swift test` cannot work here.
 
-So `--self-check` in `SelfCheck.swift` is the entire automated safety net. Consequences:
+A third route was also tried and also fails: pulling `swift-testing` in as an SPM source dependency builds its C++ internals, which need stdlib headers CLT does not ship (`fatal error: 'atomic' file not found`). All three routes are blocked.
 
-- **Use `precondition`, never `assert`.** `assert` is compiled out under `-O`, which would make the self-check silently vacuous in the release binary. `scripts/bundle.sh` runs the self-check against the *release* binary specifically to prove the checks survived optimization — if `self-check ok` stops printing during a bundle run, the checks were stripped.
-- There is no test target, and adding one will not work. Add assertions to `runSelfCheck()` instead.
-- If Xcode is ever installed, a real test target becomes viable and nothing in the design blocks it.
+So `SelfCheck.swift` carries the tests, run via `--self-check`. It uses a ~25-line `TestRunner` rather than raw assertions, so every case has a name, all cases run even after one fails, and the exit code reports the result. Consequences:
+
+- **Add tests as `t.check(...)` cases inside a `test*` function**, and call that function from `runSelfCheck()`. Do not add a test target — it cannot build.
+- **Never use `assert`** anywhere in the checks. It is compiled out under `-O`, which would make the release self-check vacuous. The harness uses ordinary comparisons, which `-O` cannot strip; `scripts/bundle.sh` runs it against the *release* binary for exactly that reason, and `set -e` aborts the bundle if it fails.
+- **`runSelfCheck()` returns `Bool`**, and `main.swift` maps it to the exit code. A failing check must exit non-zero, not trap — a trap reads as a crash rather than a test failure.
+- If Xcode is ever installed, a real test target becomes viable; the cases port over directly and only the harness wrapper is thrown away.
+
+**Verify the tests can fail.** A suite that cannot fail is theatre. After changing the harness, inject a deliberate bug, confirm the failure is reported by name with both values, confirm the exit code is 1, and confirm `bundle.sh` aborts — then revert.
 
 ## Architecture
 
