@@ -3,6 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>          <string>caffeinate-ui</string>
+    <key>CFBundleIconFile</key>            <string>AppIcon</string>
     <key>CFBundleIdentifier</key>          <string>dev.narate.caffeinate-ui</string>
     <key>CFBundleName</key>                <string>caffeinate-ui</string>
     <key>CFBundlePackageType</key>         <string>APPL</string>

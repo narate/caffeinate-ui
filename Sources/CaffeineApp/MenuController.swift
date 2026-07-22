@@ -29,6 +29,11 @@ final class MenuController: NSObject {
         withLength: NSStatusItem.variableLength)
     private var timer: Timer?
 
+    /// Surfaced in the menu when a login-item toggle throws. Kept separate from
+    /// the controller's `lastError`, which is about holding the Mac awake — the
+    /// two failures are unrelated and must not overwrite each other.
+    private var loginItemError: String?
+
     /// `nil` seconds means indefinite. Index into this array is the menu tag.
     private static let durations: [(title: String, seconds: TimeInterval?)] = [
         ("Indefinite", nil),
@@ -134,6 +139,26 @@ final class MenuController: NSObject {
         menu.addItem(prevent)
 
         menu.addItem(.separator())
+
+        // Omitted entirely when unbundled: SMAppService has no bundle to
+        // register, so the toggle would be a lie rather than a feature.
+        if LoginItem.isAvailable {
+            let launch = NSMenuItem(title: "Launch at Login",
+                                    action: #selector(toggleLoginItem),
+                                    keyEquivalent: "")
+            launch.target = self
+            launch.state = LoginItem.isEnabled ? .on : .off
+            menu.addItem(launch)
+
+            if let loginItemError {
+                let item = NSMenuItem(title: "Login item failed: \(loginItemError)",
+                                      action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
+            }
+            menu.addItem(.separator())
+        }
+
         menu.addItem(NSMenuItem(title: "Quit",
                                 action: #selector(NSApplication.terminate(_:)),
                                 keyEquivalent: "q"))
@@ -175,6 +200,17 @@ final class MenuController: NSObject {
             // is nothing left to do here, and refreshing again would depend on
             // an ordering that is easy to get wrong.
         }
+    }
+
+    @objc private func toggleLoginItem() {
+        do {
+            loginItemError = nil
+            try LoginItem.setEnabled(!LoginItem.isEnabled)
+        } catch {
+            loginItemError = error.localizedDescription
+        }
+        // Not a controller state change, so nothing else will redraw this.
+        refresh()
     }
 
     @objc private func toggleFlag(_ sender: NSMenuItem) {

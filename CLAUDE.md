@@ -32,6 +32,7 @@ Single SwiftPM executable target. Target is `CaffeineApp`, product is `caffeinat
 
 - `CaffeineController.swift` — argv construction plus the child-process lifecycle and the authoritative state machine
 - `MenuController.swift` — `formatRemaining` plus the `NSStatusItem`, menu, and countdown timer
+- `LoginItem.swift` — launch-at-login via `SMAppService`
 - `SelfCheck.swift` — every assertion in the project
 - `main.swift` — intercepts `--self-check`, then bootstraps `NSApp`
 
@@ -46,6 +47,16 @@ Single SwiftPM executable target. Target is `CaffeineApp`, product is `caffeinat
 **All state changes route through `CaffeineController.transition(to:error:force:)`.** It suppresses no-op transitions to avoid spurious menu rebuilds. `force: true` exists for one case: a flag change respawns the child with the same deadline, so `state` is unmoved but the menu still needs redrawing. Callers do not call `refresh()` themselves — the controller notifies.
 
 **`lastError` lives on the controller, not the menu.** Every spawn path reports failure through that one channel, so a failure during a flag change surfaces the same way as one during an explicit start.
+
+### Bundle-only features
+
+Launch-at-login and the icon exist only in the bundled `.app`, not under `swift run`:
+
+- `SMAppService` identifies the login item by **code signature**, so `bundle.sh` ad-hoc signs (`codesign --sign -`) — an unsigned bundle is rejected on registration. Ad-hoc is all CLT can produce and it is sufficient; this was verified by registering and unregistering a real bundle, not assumed.
+- `LoginItem.isAvailable` is false when `Bundle.main.bundleIdentifier` is nil, and the menu **omits** the item entirely rather than showing a toggle that cannot work.
+- `LoginItem.isEnabled` reads live `SMAppService` status every time. Do not cache it — the user can revoke login items in System Settings, and a cached flag would leave the checkmark asserting something the system disagrees with.
+
+**The app icon may not use an SF Symbol.** Apple's SF Symbols license prohibits symbols in app icons, so `scripts/make-icon.swift` draws the cup from Core Graphics paths. It is generated at bundle time, not committed, so it cannot drift from its generator. To retune it, edit coordinates in the 1024pt design space, run `swift scripts/make-icon.swift`, and *look at the PNG* — the geometry is easy to get subtly wrong (the handle detached from the cup on the first pass and only reading the render caught it).
 
 ### Timer detail
 
