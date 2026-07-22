@@ -327,7 +327,12 @@ final class CaffeineController {
         killChild()
         do {
             try spawn()
-            transition(to: .active(until: until))
+            // `force: true`: on success this lands on the same `.active(until:)`
+            // we started from — same deadline, no error before or after — which
+            // the no-op check would otherwise treat as nothing having happened.
+            // But a flag change is exactly why `restart` ran, and the menu's
+            // checkmarks are now stale, so the redraw must not be skipped.
+            transition(to: .active(until: until), force: true)
         } catch {
             transition(to: .idle, error: error)
         }
@@ -342,8 +347,14 @@ final class CaffeineController {
     /// never reach the menu. Only a true no-op — same state, no error before or
     /// after — skips the notification, because a redundant redraw is harmless
     /// while a missed one leaves the UI lying.
-    private func transition(to newState: State, error: Error? = nil) {
-        let isNoOp = newState == state && error == nil && lastError == nil
+    ///
+    /// `force` overrides that skip for callers that know better: `restart(until:)`
+    /// lands on the same state on success (a flag change without moving `state`
+    /// or `lastError`), but the flags themselves changed and the menu's
+    /// checkmarks are now stale, so the UI still needs to redraw even though
+    /// nothing the no-op check inspects has moved.
+    private func transition(to newState: State, error: Error? = nil, force: Bool = false) {
+        let isNoOp = !force && newState == state && error == nil && lastError == nil
         state = newState
         lastError = error
         if !isNoOp { onStateChange?() }
