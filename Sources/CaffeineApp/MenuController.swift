@@ -28,7 +28,6 @@ final class MenuController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(
         withLength: NSStatusItem.variableLength)
     private var timer: Timer?
-    private var lastError: Error?
 
     /// `nil` seconds means indefinite. Index into this array is the menu tag.
     private static let durations: [(title: String, seconds: TimeInterval?)] = [
@@ -53,23 +52,40 @@ final class MenuController: NSObject {
     }
 
     private func updateTitle() {
+        guard let button = statusItem.button else { return }
+        // Explicit, so icon-plus-countdown layout does not depend on whatever
+        // AppKit's inherited default happens to be.
+        button.imagePosition = .imageLeading
+
         let symbol = controller.isActive ? "cup.and.saucer.fill" : "cup.and.saucer"
         let image = NSImage(systemSymbolName: symbol,
                             accessibilityDescription: "caffeinate")
         image?.isTemplate = true   // inverts correctly in light and dark menubars
-        statusItem.button?.image = image
 
+        let countdown: String
         if case .active(let until) = controller.state, let until {
-            statusItem.button?.title = " " + formatRemaining(until.timeIntervalSinceNow)
+            countdown = " " + formatRemaining(until.timeIntervalSinceNow)
         } else {
-            statusItem.button?.title = ""
+            countdown = ""
+        }
+
+        if let image {
+            button.image = image
+            button.title = countdown
+        } else {
+            // The symbol lookup is optional, and assigning nil would leave a
+            // zero-width, unclickable status item — no icon, no title, and no
+            // way to reach Quit from inside the app. Fall back to text so the
+            // menu stays reachable.
+            button.image = nil
+            button.title = "☕" + countdown
         }
     }
 
     private func rebuildMenu() {
         let menu = NSMenu()
 
-        if let lastError {
+        if let lastError = controller.lastError {
             // Report the actual failure. An empty flag set and a missing
             // binary are different problems and must not share a message.
             let message = (lastError as? CaffeineError) == .noFlagsSelected
@@ -82,10 +98,19 @@ final class MenuController: NSObject {
         }
 
         for (index, duration) in Self.durations.enumerated() {
-            // Row 0 doubles as the off switch once something is running.
+            // Row 0 doubles as the off switch once something is running. Bind
+            // the action to the label decided here, never re-derive intent from
+            // `controller.isActive` at click time: AppKit keeps displaying a
+            // menu it is already tracking even after `statusItem.menu` is
+            // reassigned, so a row reading "Turn Off" can be clicked after the
+            // session has already ended (deadline expiry with the menu open, or
+            // the child killed externally). Re-deriving would then read
+            // `isActive == false` and start an indefinite session — the exact
+            // opposite of what the row says.
             let isOffRow = duration.seconds == nil && controller.isActive
             let item = NSMenuItem(title: isOffRow ? "Turn Off" : duration.title,
-                                  action: #selector(selectDuration(_:)),
+                                  action: isOffRow ? #selector(stopSession)
+                                                   : #selector(selectDuration(_:)),
                                   keyEquivalent: "")
             item.target = self
             item.tag = index
@@ -136,18 +161,19 @@ final class MenuController: NSObject {
         timer = tick
     }
 
+    /// The off row's own action. A stale "Turn Off" click therefore stops — or
+    /// harmlessly does nothing if the session already ended — instead of
+    /// starting an indefinite one.
+    @objc private func stopSession() { controller.stop() }
+
     @objc private func selectDuration(_ sender: NSMenuItem) {
-        let duration = Self.durations[sender.tag]
-        if duration.seconds == nil && controller.isActive {
-            controller.stop()
-            return
-        }
         do {
-            lastError = nil
-            try controller.start(duration: duration.seconds)
+            try controller.start(duration: Self.durations[sender.tag].seconds)
         } catch {
-            lastError = error
-            refresh()
+            // The controller has already recorded this in `lastError` and fired
+            // onStateChange, which rebuilt this menu with the error row. There
+            // is nothing left to do here, and refreshing again would depend on
+            // an ordering that is easy to get wrong.
         }
     }
 
@@ -156,7 +182,9 @@ final class MenuController: NSObject {
               let flag = SleepFlag(rawValue: raw) else { return }
         var updated = controller.flags
         if updated.contains(flag) { updated.remove(flag) } else { updated.insert(flag) }
+        // No refresh here: `flags`'s observer notifies on both branches — after
+        // respawning when active, and directly when idle — so the redraw
+        // happens exactly once either way.
         controller.flags = updated
-        refresh()
     }
 }

@@ -68,7 +68,7 @@ only.
 
 ## Components
 
-### `CaffeineController` (CaffeineKit)
+### `CaffeineController`
 
 Owns the child process and the authoritative state.
 
@@ -92,12 +92,15 @@ Two pure functions carry the logic worth testing:
 - `caffeinateArgs(flags:watching:) throws -> [String]` — builds argv as flags in
   fixed `-d -i -m -s` order, then `-w <pid>`. The order is fixed rather than
   set-iteration order so the tests can assert on exact argv. Throws
-  `CaffeineError.noFlagsSelected` on an empty set
-  rather than spawning a `caffeinate` with no flags, which would hold no
-  assertion while the UI showed "active".
+  `CaffeineError.noFlagsSelected` on an empty set rather than spawning a
+  `caffeinate` with no flags. Per `man caffeinate`, *"if no assertion flags are
+  specified, caffeinate creates an assertion to prevent idle sleep"* — so an
+  unflagged child would hold the Mac awake on an implicit idle assertion while
+  the Prevent submenu showed every box unchecked. The UI would understate what
+  is happening, not overstate it.
 - `formatRemaining(_: TimeInterval) -> String` — `59s`, `42m`, `1h 05m`.
 
-### `MenuController` (CaffeineKit)
+### `MenuController`
 
 Owns the `NSStatusItem` and rebuilds the menu on state change. Runs a 1-second
 `Timer` only while active with a finite duration; it updates the title and calls
@@ -172,10 +175,27 @@ the `com.apple.quarantine` attribute, which is only applied to downloads.
 
 ## Error handling
 
+`CaffeineController` owns the failure, as `lastError`, and `MenuController`
+renders it. The error lives on the controller because not every spawn is
+triggered by a UI action: changing flags mid-session respawns from the `flags`
+observer, which has no call site to catch a throw. With one owner, every spawn
+path — UI-driven or not — reports through the same channel instead of failing
+silently.
+
 - `Process.run()` throws → the menu shows a disabled `caffeinate unavailable`
   item instead of silently doing nothing.
 - Child dies unexpectedly → `terminationHandler` returns state to `.idle`.
-- Empty flag set → `start` throws before spawning.
+- Empty flag set → the spawn throws before any `Process` is built, and the menu
+  shows `Select at least one Prevent option`. This is the case that would
+  otherwise be silent: unchecking the last Prevent flag during a session ends
+  it, and without a reported error the cup would simply empty with no
+  explanation. See Components for why an unflagged `caffeinate` must not be
+  spawned.
+
+State and error changes funnel through one transition so observers are notified
+exactly once per operation. Notifying only when `state` changes is not enough —
+a failure raised while state is already `.idle` moves only `lastError`, and the
+error would never reach the menu.
 
 ## Testing
 
@@ -198,11 +218,21 @@ Assertions use `precondition`, not `assert`. `assert` is compiled out under
 `-O`, which would make the self-check silently vacuous in the release build that
 `bundle.sh` produces.
 
-Coverage is the two pure functions; the subprocess is not exercised.
+Coverage is the two pure functions plus the one controller path that reaches no
+subprocess; a running child is never exercised.
 
 - `caffeinateArgs` — flag sets produce correct argv including `-w <pid>`; empty
-  set throws.
-- `formatRemaining` — sub-minute, minutes, hours, and the zero boundary.
+  set throws. Two design invariants are additionally checked across all 15
+  non-empty flag subsets rather than a hand-picked case: argv always ends in
+  `-w <pid>` (crash safety holds for every combination), and never contains
+  `-t` (the deadline is `MenuController`'s `Timer` alone).
+- `formatRemaining` — sub-minute, minutes, hours, the zero boundary, and a
+  fractional input, which is what `MenuController` actually passes.
+- `CaffeineController.start` with an empty flag set — must throw and leave the
+  controller observably idle, pinning the invariant that `isActive` is never
+  true unless a child is really running. Safe to assert here because the empty
+  set throws inside `caffeinateArgs`, which `spawn` calls before it builds or
+  runs a `Process`, so nothing is spawned and no power assertion is held.
 
 Installing Xcode later would make a real test target viable; nothing in this
 design blocks that.

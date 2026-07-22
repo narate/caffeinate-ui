@@ -74,8 +74,12 @@ func runSelfCheck() {
     precondition(try! caffeinateArgs(flags: Set(SleepFlag.allCases), watching: 1)
                  == ["-d", "-i", "-m", "-s", "-w", "1"])
 
-    // An empty flag set must throw rather than spawn a caffeinate that holds
-    // no assertion while the UI claims to be active.
+    // An empty flag set must throw rather than spawn a bare `caffeinate`.
+    // Per `man caffeinate`: "If no assertion flags are specified, caffeinate
+    // creates an assertion to prevent idle sleep." So an unflagged child holds
+    // the Mac awake on an implicit idle assertion while the Prevent submenu
+    // shows every box unchecked — the UI would understate what is happening,
+    // not overstate it.
     do {
         _ = try caffeinateArgs(flags: [], watching: 1)
         preconditionFailure("empty flag set should have thrown")
@@ -175,6 +179,11 @@ Add to `runSelfCheck()` in `Sources/CaffeineApp/SelfCheck.swift`, immediately be
     precondition(formatRemaining(0)    == "0s")
     precondition(formatRemaining(-5)   == "0s")
     precondition(formatRemaining(59)   == "59s")
+    // Fractional input, which is what MenuController actually passes
+    // (`until.timeIntervalSinceNow`). The only place round-vs-truncate is
+    // user-visible: a fresh 15m session reads 899.9995s — "15m" rounded,
+    // "14m" truncated.
+    precondition(formatRemaining(59.6) == "1m")
     precondition(formatRemaining(60)   == "1m")
     precondition(formatRemaining(3599) == "59m")
     precondition(formatRemaining(3600) == "1h 00m")
@@ -229,11 +238,21 @@ git commit -m "Add formatRemaining for the menubar countdown"
   - `final class CaffeineController`
   - `CaffeineController.State` — `.idle` / `.active(until: Date?)`, `Equatable`
   - `var state: State { get }`, `var flags: Set<SleepFlag>`, `var isActive: Bool`
+  - `var lastError: Error? { get }`
   - `var onStateChange: (() -> Void)?`
   - `func start(duration: TimeInterval?) throws`, `func stop()`
 
-There is no automated test for this task — it spawns a real subprocess, and no
-test framework is available. Step 3 is a manual verification against `pgrep`.
+The subprocess itself has no automated test — it spawns for real, and no test
+framework is available. Step 3 is a manual verification against `pgrep`. The one
+path that reaches no subprocess *is* asserted in Task 6: a start with an empty
+flag set must throw and leave the controller idle.
+
+`lastError` lives on the controller rather than on `MenuController` because not
+every spawn is triggered by a UI action. Changing flags mid-session respawns
+from the `flags` observer, which has no call site to catch a throw — so a
+failure there (dropping the last Prevent flag, or a genuine `Process.run()`
+error) would otherwise vanish silently, emptying the cup with no explanation.
+One owner means every spawn path reports through the same channel.
 
 - [ ] **Step 1: Implement the controller**
 
@@ -249,15 +268,30 @@ final class CaffeineController {
         case active(until: Date?)
     }
 
-    private(set) var state: State = .idle {
-        didSet { if state != oldValue { onStateChange?() } }
-    }
+    private(set) var state: State = .idle
+
+    /// The last spawn failure, or `nil` if the last spawn attempt succeeded.
+    ///
+    /// Owned here rather than in the UI because not every spawn is triggered by
+    /// a UI action: unchecking the last Prevent flag mid-session respawns from
+    /// `flags`'s observer, and that path has no call site to catch a throw. With
+    /// the error living here, every spawn — UI-driven or not — reports through
+    /// one channel.
+    private(set) var lastError: Error?
 
     /// Display and idle sleep — what "keep awake" means to most people.
     var flags: Set<SleepFlag> = [.display, .idle] {
         didSet {
             guard flags != oldValue else { return }
-            if case .active(let until) = state { restart(until: until) }
+            if case .active(let until) = state {
+                restart(until: until)
+            } else {
+                // Idle: nothing to respawn, but observers still need to redraw
+                // the checkmarks — and a "no flags selected" complaint is now
+                // stale, since the user just changed the setting it was about.
+                lastError = nil
+                onStateChange?()
+            }
         }
     }
 
@@ -272,27 +306,47 @@ final class CaffeineController {
         let until = duration.map { Date().addingTimeInterval($0) }
         do {
             try spawn()
-            state = .active(until: until)
+            transition(to: .active(until: until))
         } catch {
-            state = .idle
+            transition(to: .idle, error: error)
             throw error
         }
     }
 
     func stop() {
         killChild()
-        state = .idle
+        transition(to: .idle)
     }
 
     /// Flags changed mid-session: swap the child without disturbing the deadline.
+    ///
+    /// The failure here is the one with no other way out: dropping the last
+    /// Prevent flag makes `spawn` throw, and silently falling back to `.idle`
+    /// would empty the cup and clear the countdown with nothing saying why.
     private func restart(until: Date?) {
         killChild()
         do {
             try spawn()
-            state = .active(until: until)
+            transition(to: .active(until: until))
         } catch {
-            state = .idle
+            transition(to: .idle, error: error)
         }
+    }
+
+    /// The single funnel for state and error changes, so observers get exactly
+    /// one notification per operation and never see a half-updated view where
+    /// `state` has moved but `lastError` has not.
+    ///
+    /// Notifying on `state` changes alone is not enough: a failure raised while
+    /// state is already `.idle` moves only `lastError`, and the error would
+    /// never reach the menu. Only a true no-op — same state, no error before or
+    /// after — skips the notification, because a redundant redraw is harmless
+    /// while a missed one leaves the UI lying.
+    private func transition(to newState: State, error: Error? = nil) {
+        let isNoOp = newState == state && error == nil && lastError == nil
+        state = newState
+        lastError = error
+        if !isNoOp { onStateChange?() }
     }
 
     /// Clears the termination handler before terminating, so our own kill does
@@ -318,7 +372,10 @@ final class CaffeineController {
             DispatchQueue.main.async {
                 guard let self, self.process === child else { return }
                 self.process = nil
-                self.state = .idle
+                // Not an error we raised — the child simply ended. `lastError`
+                // is already nil here, since a running child means the spawn
+                // that produced it succeeded and cleared it.
+                self.transition(to: .idle)
             }
         }
         try child.run()
@@ -388,8 +445,16 @@ git commit -m "Add CaffeineController subprocess lifecycle"
 - Modify: `Sources/CaffeineApp/main.swift`
 
 **Interfaces:**
-- Consumes: `CaffeineController`, `CaffeineController.State`, `SleepFlag`, `CaffeineError`, `formatRemaining(_:)`
+- Consumes: `CaffeineController`, `CaffeineController.State`, `CaffeineController.lastError`, `SleepFlag`, `CaffeineError`, `formatRemaining(_:)`
 - Produces: `final class MenuController: NSObject`, `init(controller:)`, `func install()`
+
+`MenuController` renders errors but does not own them — it reads
+`controller.lastError`. It also never re-derives a row's intent at click time:
+the off row carries its own `stopSession` action, decided when the row's label
+was. AppKit keeps displaying a menu it is already tracking even after
+`statusItem.menu` is reassigned, so a row reading "Turn Off" can outlive the
+session it refers to; a handler that consulted `controller.isActive` at that
+moment would start an indefinite session instead of stopping one.
 
 - [ ] **Step 1: Implement the menu**
 
@@ -414,7 +479,6 @@ final class MenuController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(
         withLength: NSStatusItem.variableLength)
     private var timer: Timer?
-    private var lastError: Error?
 
     /// `nil` seconds means indefinite. Index into this array is the menu tag.
     private static let durations: [(title: String, seconds: TimeInterval?)] = [
@@ -439,23 +503,40 @@ final class MenuController: NSObject {
     }
 
     private func updateTitle() {
+        guard let button = statusItem.button else { return }
+        // Explicit, so icon-plus-countdown layout does not depend on whatever
+        // AppKit's inherited default happens to be.
+        button.imagePosition = .imageLeading
+
         let symbol = controller.isActive ? "cup.and.saucer.fill" : "cup.and.saucer"
         let image = NSImage(systemSymbolName: symbol,
                             accessibilityDescription: "caffeinate")
         image?.isTemplate = true   // inverts correctly in light and dark menubars
-        statusItem.button?.image = image
 
+        let countdown: String
         if case .active(let until) = controller.state, let until {
-            statusItem.button?.title = " " + formatRemaining(until.timeIntervalSinceNow)
+            countdown = " " + formatRemaining(until.timeIntervalSinceNow)
         } else {
-            statusItem.button?.title = ""
+            countdown = ""
+        }
+
+        if let image {
+            button.image = image
+            button.title = countdown
+        } else {
+            // The symbol lookup is optional, and assigning nil would leave a
+            // zero-width, unclickable status item — no icon, no title, and no
+            // way to reach Quit from inside the app. Fall back to text so the
+            // menu stays reachable.
+            button.image = nil
+            button.title = "☕" + countdown
         }
     }
 
     private func rebuildMenu() {
         let menu = NSMenu()
 
-        if let lastError {
+        if let lastError = controller.lastError {
             // Report the actual failure. An empty flag set and a missing
             // binary are different problems and must not share a message.
             let message = (lastError as? CaffeineError) == .noFlagsSelected
@@ -468,10 +549,19 @@ final class MenuController: NSObject {
         }
 
         for (index, duration) in Self.durations.enumerated() {
-            // Row 0 doubles as the off switch once something is running.
+            // Row 0 doubles as the off switch once something is running. Bind
+            // the action to the label decided here, never re-derive intent from
+            // `controller.isActive` at click time: AppKit keeps displaying a
+            // menu it is already tracking even after `statusItem.menu` is
+            // reassigned, so a row reading "Turn Off" can be clicked after the
+            // session has already ended (deadline expiry with the menu open, or
+            // the child killed externally). Re-deriving would then read
+            // `isActive == false` and start an indefinite session — the exact
+            // opposite of what the row says.
             let isOffRow = duration.seconds == nil && controller.isActive
             let item = NSMenuItem(title: isOffRow ? "Turn Off" : duration.title,
-                                  action: #selector(selectDuration(_:)),
+                                  action: isOffRow ? #selector(stopSession)
+                                                   : #selector(selectDuration(_:)),
                                   keyEquivalent: "")
             item.target = self
             item.tag = index
@@ -522,18 +612,19 @@ final class MenuController: NSObject {
         timer = tick
     }
 
+    /// The off row's own action. A stale "Turn Off" click therefore stops — or
+    /// harmlessly does nothing if the session already ended — instead of
+    /// starting an indefinite one.
+    @objc private func stopSession() { controller.stop() }
+
     @objc private func selectDuration(_ sender: NSMenuItem) {
-        let duration = Self.durations[sender.tag]
-        if duration.seconds == nil && controller.isActive {
-            controller.stop()
-            return
-        }
         do {
-            lastError = nil
-            try controller.start(duration: duration.seconds)
+            try controller.start(duration: Self.durations[sender.tag].seconds)
         } catch {
-            lastError = error
-            refresh()
+            // The controller has already recorded this in `lastError` and fired
+            // onStateChange, which rebuilt this menu with the error row. There
+            // is nothing left to do here, and refreshing again would depend on
+            // an ordering that is easy to get wrong.
         }
     }
 
@@ -542,8 +633,10 @@ final class MenuController: NSObject {
               let flag = SleepFlag(rawValue: raw) else { return }
         var updated = controller.flags
         if updated.contains(flag) { updated.remove(flag) } else { updated.insert(flag) }
+        // No refresh here: `flags`'s observer notifies on both branches — after
+        // respawning when active, and directly when idle — so the redraw
+        // happens exactly once either way.
         controller.flags = updated
-        refresh()
     }
 }
 ```
@@ -590,7 +683,10 @@ Check each of these:
 5. Re-open the menu — row 0 now reads `Turn Off`. Click it; the countdown clears and the icon empties.
 6. In another terminal while active: `pgrep -fl caffeinate` shows the child with the expected flags.
 7. Uncheck every `Prevent` option, then pick a duration — the menu shows `Select at least one Prevent option` rather than pretending to work.
-8. `Quit` exits, and `pgrep -fl caffeinate` afterward shows no leftover child.
+8. Re-check a `Prevent` option — that message clears, since the setting it complained about has changed.
+9. Start a session, then uncheck `Prevent` options until none are left. The session ends *and* the menu shows `Select at least one Prevent option`. The failure here happens inside the `flags` observer with no UI call site to catch it, so a silent fallback to idle would empty the cup with nothing saying why.
+10. Start a 15-minute session, open the menu, and leave it open past a manually shortened deadline (or run `killall caffeinate` in another terminal). The still-displayed row reads `Turn Off`; clicking it must not start an indefinite session.
+11. `Quit` exits, and `pgrep -fl caffeinate` afterward shows no leftover child.
 
 - [ ] **Step 5: Commit**
 
@@ -713,7 +809,7 @@ git commit -m "Add .app bundle script and Info.plist"
 | SF Symbol template icon | 4 |
 | 1-second timer, only while finite | 4 |
 | `setActivationPolicy(.accessory)` | 4 |
-| Error → disabled menu item | 4 |
+| Error → disabled menu item | 3 (`lastError` owner), 4 (renders it) |
 | `--self-check` with `precondition` | 1, 2 |
 | `bundle.sh`, `Info.plist`, `LSUIElement` | 5 |
 | Gatekeeper non-issue | 5 (verified in step 4) |
@@ -725,11 +821,13 @@ one step that removes code (Task 3 Step 4) names exactly what to delete.
 
 **Type consistency:** `caffeinateArgs(flags:watching:)`, `formatRemaining(_:)`,
 `start(duration:)`, `stop()`, `onStateChange`, `isActive`, `state`, `flags`,
-and `install()` are spelled identically in the interface blocks and every
-call site. `State.active(until:)` is destructured as `case .active(let until)`
-throughout.
+`lastError`, and `install()` are spelled identically in the interface blocks and
+every call site. `State.active(until:)` is destructured as
+`case .active(let until)` throughout.
 
-**Note on Task 3:** it is the only task without an automated check, because it
-spawns a real subprocess and no test framework exists here. Its manual `pgrep`
-verification is the compensating control and should not be skipped — it is the
-only thing that proves the crash-safety design works.
+**Note on Task 3:** its *running subprocess* is the one thing no automated check
+covers, because it spawns for real and no test framework exists here. The manual
+`pgrep` verification is the compensating control and should not be skipped — it
+is the only thing that proves the crash-safety design works. The controller's
+rejected-start path *is* asserted, since it throws before any `Process` is built
+and so has no side effect to worry about.
