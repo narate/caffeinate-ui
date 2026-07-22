@@ -1,0 +1,189 @@
+# caffeinate-ui — Design
+
+**Date:** 2026-07-22
+**Status:** Approved, pending implementation plan
+
+## Purpose
+
+A macOS menubar app that keeps the Mac awake, wrapping the system `caffeinate`
+binary. Click the menubar icon, pick a duration, the Mac stays up. Click again
+to release.
+
+## Constraints
+
+- **No Xcode.** The machine has Command Line Tools only (Swift 6.3.3). SwiftPM
+  builds work; `.xcodeproj` and `xcodebuild` are unavailable. Everything here is
+  buildable with `swift build`.
+- **macOS 26.5**, Apple Silicon. Deployment target set to macOS 13.
+
+## Approach
+
+Spawn `/usr/bin/caffeinate` as a child process; terminate it to release. Not
+IOKit power assertions — `caffeinate` is the platform feature that already wraps
+those, and reaching past it would be writing code the OS ships.
+
+### Crash safety
+
+The child is spawned as:
+
+```
+/usr/bin/caffeinate <flags> -w <our-own-pid>
+```
+
+`-w` tells caffeinate to exit when the watched process exits. Passing our own
+PID means that **if the app crashes or is force-quit, the child exits too**.
+Without this, a crash leaves a `caffeinate` running with no UI to stop it,
+pinning the Mac awake until the user finds it in Activity Monitor.
+
+### Duration handling
+
+Expiry is driven by the app's own `Timer`, not `caffeinate -t`. The timer
+already exists to redraw the menubar countdown, so reusing it keeps one source
+of truth for "when does this end". Using `-t` as well would mean two clocks that
+can disagree, and the visible countdown could hit zero while the assertion is
+still held (or the reverse).
+
+## Structure
+
+Logic lives in a library target so it is testable; the executable target is a
+thin shell. SwiftPM cannot cleanly test executable targets, which is the only
+reason for the split.
+
+```
+Package.swift
+Resources/Info.plist
+scripts/bundle.sh
+Sources/CaffeineKit/CaffeineController.swift   subprocess lifecycle, arg building
+Sources/CaffeineKit/MenuController.swift       status item, menu, countdown timer
+Sources/CaffeineApp/main.swift                 NSApp bootstrap and wiring
+Tests/CaffeineKitTests/CaffeineKitTests.swift
+```
+
+Target names must be valid Swift module identifiers, so the hyphenated name
+lives on the *product*: `.executable(name: "caffeinate-ui", targets:
+["CaffeineApp"])`. The built binary is `.build/release/caffeinate-ui`.
+
+## Components
+
+### `CaffeineController` (CaffeineKit)
+
+Owns the child process and the authoritative state.
+
+```swift
+enum State {
+    case idle
+    case active(until: Date?)   // nil = indefinite
+}
+```
+
+API: `start(duration: TimeInterval?) throws`, `stop()`, `flags: Set<SleepFlag>`,
+`onStateChange: (() -> Void)?`.
+
+The process's `terminationHandler` resets state to `.idle`. A `caffeinate` that
+dies on its own therefore cannot leave the UI claiming to be active.
+
+Changing flags while active terminates and respawns with the new argv.
+
+Two pure functions carry the logic worth testing:
+
+- `caffeinateArgs(flags:watching:) throws -> [String]` — builds argv in a
+  deterministic order. Throws `CaffeineError.noFlagsSelected` on an empty set
+  rather than spawning a `caffeinate` with no flags, which would hold no
+  assertion while the UI showed "active".
+- `formatRemaining(_: TimeInterval) -> String` — `59s`, `42m`, `1h 05m`.
+
+### `MenuController` (CaffeineKit)
+
+Owns the `NSStatusItem` and rebuilds the menu on state change. Runs a 1-second
+`Timer` only while active with a finite duration; it updates the title and calls
+`stop()` at expiry. Invalidated whenever state is idle or indefinite.
+
+### `main.swift` (CaffeineApp)
+
+```swift
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
+let controller = CaffeineController()
+let menu = MenuController(controller: controller)
+app.run()
+```
+
+## Sleep flags
+
+| Flag | Meaning                | Default |
+|------|------------------------|---------|
+| `-d` | Prevent display sleep  | on      |
+| `-i` | Prevent idle sleep     | on      |
+| `-m` | Prevent disk sleep     | off     |
+| `-s` | Prevent system sleep   | off     |
+
+`-d -i` is the default because it matches what "keep awake" means to most
+people. `-s` only takes effect on AC power; the submenu item says so.
+
+## Menu layout
+
+```
+☕ 42m              title: icon plus countdown, icon-only when idle
+─────────────
+  Off / Indefinite
+  15 minutes
+  1 hour
+  2 hours
+─────────────
+  Prevent ▸  ✓ Display (-d)
+             ✓ Idle (-i)
+               Disk (-m)
+               System (-s, AC power only)
+─────────────
+  Quit
+```
+
+Icon: SF Symbol `cup.and.saucer.fill` when active, `cup.and.saucer` when idle,
+as a template image so it inverts correctly in light and dark menubars.
+
+## Launching
+
+`swift run` works for iteration, but a menubar app you cannot double-click is
+not finished. `scripts/bundle.sh` assembles a real `.app` — a directory layout,
+not an Xcode project:
+
+```
+build/caffeinate-ui.app/
+└── Contents/
+    ├── Info.plist              LSUIElement=true, bundle id, version
+    └── MacOS/caffeinate-ui     the release binary
+```
+
+The script runs `swift build -c release`, creates those paths, and copies the
+binary and plist in. The result can be dragged to `/Applications` and launched
+from Spotlight.
+
+`LSUIElement=true` hides the dock icon for the bundled app. `setActivationPolicy(.accessory)`
+stays in `main.swift` anyway so that a bare `swift run` also behaves as a
+menubar app, without rebundling on every change.
+
+Gatekeeper is not an obstacle: the binary is compiled locally and never receives
+the `com.apple.quarantine` attribute, which is only applied to downloads.
+
+## Error handling
+
+- `Process.run()` throws → the menu shows a disabled `caffeinate unavailable`
+  item instead of silently doing nothing.
+- Child dies unexpectedly → `terminationHandler` returns state to `.idle`.
+- Empty flag set → `start` throws before spawning.
+
+## Testing
+
+`swift test`, using Swift Testing (bundled with the toolchain, no dependency).
+Tests cover the pure functions only; the subprocess is not exercised.
+
+- `caffeinateArgs` — flag sets produce correct argv including `-w <pid>`; empty
+  set throws.
+- `formatRemaining` — sub-minute, minutes, hours, and the zero boundary.
+
+## Out of scope for v1
+
+- **Launch at login.** A LaunchAgent plist would do it without code signing, but
+  it is not needed to validate the app.
+- **Persisting flag choices** across restarts.
+- **Sleep/wake event handling** — reacting to lid close, power source changes.
