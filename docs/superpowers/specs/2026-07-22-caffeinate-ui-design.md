@@ -45,23 +45,26 @@ still held (or the reverse).
 
 ## Structure
 
-Logic lives in a library target so it is testable; the executable target is a
-thin shell. SwiftPM cannot cleanly test executable targets, which is the only
-reason for the split.
+A single executable target. An earlier draft split logic into a `CaffeineKit`
+library so SwiftPM could test it, but no test framework is available on this
+machine (see Testing), so the split had no remaining justification.
 
 ```
 Package.swift
 Resources/Info.plist
 scripts/bundle.sh
-Sources/CaffeineKit/CaffeineController.swift   subprocess lifecycle, arg building
-Sources/CaffeineKit/MenuController.swift       status item, menu, countdown timer
+Sources/CaffeineApp/CaffeineController.swift   subprocess lifecycle, arg building
+Sources/CaffeineApp/MenuController.swift       status item, menu, countdown timer
+Sources/CaffeineApp/SelfCheck.swift            --self-check assertions
 Sources/CaffeineApp/main.swift                 NSApp bootstrap and wiring
-Tests/CaffeineKitTests/CaffeineKitTests.swift
 ```
 
 Target names must be valid Swift module identifiers, so the hyphenated name
 lives on the *product*: `.executable(name: "caffeinate-ui", targets:
 ["CaffeineApp"])`. The built binary is `.build/release/caffeinate-ui`.
+
+Only `main.swift` may contain top-level code; the other files hold declarations
+only.
 
 ## Components
 
@@ -176,12 +179,33 @@ the `com.apple.quarantine` attribute, which is only applied to downloads.
 
 ## Testing
 
-`swift test`, using Swift Testing (bundled with the toolchain, no dependency).
-Tests cover the pure functions only; the subprocess is not exercised.
+**Neither `XCTest` nor `Testing` is importable with Command Line Tools only** —
+both frameworks ship inside Xcode. This was verified on the machine, not
+assumed; `swift test` cannot run here at all. The options were to add
+swift-testing as a source dependency, install Xcode, or drop the framework.
+
+The check therefore runs as a flag on the app itself:
+
+```
+swift run caffeinate-ui --self-check
+```
+
+`main.swift` intercepts the flag before `NSApp.run()`, executes the assertions
+in `SelfCheck.swift`, prints a result, and exits — 0 on pass, non-zero on
+failure, so it works in a git hook or CI later.
+
+Assertions use `precondition`, not `assert`. `assert` is compiled out under
+`-O`, which would make the self-check silently vacuous in the release build that
+`bundle.sh` produces.
+
+Coverage is the two pure functions; the subprocess is not exercised.
 
 - `caffeinateArgs` — flag sets produce correct argv including `-w <pid>`; empty
   set throws.
 - `formatRemaining` — sub-minute, minutes, hours, and the zero boundary.
+
+Installing Xcode later would make a real test target viable; nothing in this
+design blocks that.
 
 ## Out of scope for v1
 
