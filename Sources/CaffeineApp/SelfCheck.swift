@@ -22,5 +22,16 @@ func runSelfCheck() {
         preconditionFailure("unexpected error: \(error)")
     }
 
+    // formatRemaining: seconds under a minute, whole minutes under an hour,
+    // then "1h 05m". Negative intervals clamp to "0s" so an overdue timer
+    // never renders "-3s".
+    precondition(formatRemaining(0)    == "0s")
+    precondition(formatRemaining(-5)   == "0s")
+    precondition(formatRemaining(59)   == "59s")
+    precondition(formatRemaining(60)   == "1m")
+    precondition(formatRemaining(3599) == "59m")
+    precondition(formatRemaining(3600) == "1h 00m")
+    precondition(formatRemaining(3900) == "1h 05m")
+
     print("self-check ok")
 }
