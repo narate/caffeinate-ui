@@ -137,7 +137,7 @@ people. `-s` only takes effect on AC power; the submenu item says so.
   15 minutes
   1 hour
   2 hours
-  Custom…            NSAlert prompt, whole minutes, 1...1440
+  Custom…            NSAlert prompt: 30s / 45m / 2h / 1d, up to 7 days
 ─────────────
   Prevent ▸  ✓ Display (-d)
              ✓ Idle (-i)

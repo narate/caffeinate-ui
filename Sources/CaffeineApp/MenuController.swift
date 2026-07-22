@@ -10,25 +10,47 @@ func formatRemaining(_ interval: TimeInterval) -> String {
     return String(format: "%dh %02dm", minutes / 60, minutes % 60)
 }
 
-/// Upper bound on a custom duration, in minutes (24 hours).
+/// Upper bound on a custom duration, in seconds (7 days).
 ///
 /// Bounded because the value becomes a live deadline: an unbounded field turns
 /// a fat-fingered paste into a session that outlives the user's interest in it,
-/// with no way to tell from the menubar that anything is wrong.
-let maxCustomMinutes = 1440
+/// with no way to tell from the menubar that anything is wrong. Seven days
+/// rather than one so that the `d` suffix is worth having — a 24-hour cap would
+/// accept `1d` and reject every other value of it.
+let maxCustomSeconds: TimeInterval = 7 * 24 * 3600
 
-/// Parses a custom-duration entry into a `TimeInterval`, or `nil` if the text is
-/// not a whole number of minutes within `1...maxCustomMinutes`.
+/// Parses a custom-duration entry into a `TimeInterval`, or `nil` if it is not a
+/// whole number of `s`/`m`/`h`/`d` within `1...maxCustomSeconds`.
 ///
-/// Deliberately strict: minutes only, no unit suffixes and no decimals. One
-/// accepted format the field can state plainly beats a lenient parser whose
-/// rules the user has to guess at.
-func parseDurationMinutes(_ text: String) -> TimeInterval? {
-    let trimmed = text.trimmingCharacters(in: .whitespaces)
-    guard let minutes = Int(trimmed), (1...maxCustomMinutes).contains(minutes) else {
-        return nil
+/// A bare number means minutes, which is both the most common case and what the
+/// field accepted before suffixes existed.
+///
+/// Whitespace is stripped everywhere rather than only at the ends, so `2 h`
+/// works. Decimals are still rejected: `1.5h` would have to round somewhere the
+/// user cannot see, and `90m` says the same thing without the ambiguity.
+func parseDuration(_ text: String) -> TimeInterval? {
+    let cleaned = text.filter { !$0.isWhitespace }.lowercased()
+    guard !cleaned.isEmpty else { return nil }
+
+    let units: [Character: TimeInterval] = ["s": 1, "m": 60, "h": 3600, "d": 86400]
+
+    let magnitude: String
+    let unit: TimeInterval
+    if let suffix = cleaned.last, let multiplier = units[suffix] {
+        magnitude = String(cleaned.dropLast())
+        unit = multiplier
+    } else {
+        magnitude = cleaned
+        unit = 60
     }
-    return TimeInterval(minutes * 60)
+
+    // `Int` rejects decimals, exponents, and values too large to represent, so
+    // the range check below only has to police intent, not arithmetic.
+    guard let value = Int(magnitude) else { return nil }
+
+    let seconds = TimeInterval(value) * unit
+    guard seconds >= 1, seconds <= maxCustomSeconds else { return nil }
+    return seconds
 }
 
 extension SleepFlag {
@@ -236,18 +258,19 @@ final class MenuController: NSObject {
 
         let alert = NSAlert()
         alert.messageText = "Keep awake for how long?"
-        alert.informativeText = "Whole minutes, 1 to \(maxCustomMinutes)."
+        alert.informativeText =
+            "30s, 45m, 2h, 1d — a bare number means minutes. Up to 7 days."
         alert.addButton(withTitle: "Start")
         alert.addButton(withTitle: "Cancel")
 
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
-        field.placeholderString = "45"
+        field.placeholderString = "45m"
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        guard let duration = parseDurationMinutes(field.stringValue) else {
+        guard let duration = parseDuration(field.stringValue) else {
             // Reported here rather than as a menu row: the menu has already
             // closed by now, so a row would not be seen until the user next
             // opened it — long after the typo stopped making sense.
@@ -255,7 +278,8 @@ final class MenuController: NSObject {
             invalid.alertStyle = .warning
             invalid.messageText = "Not a valid duration"
             invalid.informativeText =
-                "Enter a whole number of minutes between 1 and \(maxCustomMinutes)."
+                "Try 30s, 45m, 2h, or 1d. A bare number means minutes. "
+                + "Whole numbers only, up to 7 days."
             invalid.runModal()
             return
         }

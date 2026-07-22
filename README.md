@@ -38,7 +38,7 @@ Click the cup in the menubar:
   15 minutes
   1 hour
   2 hours
-  Custom…            prompts for a number of minutes
+  Custom…            30s / 45m / 2h / 1d, up to 7 days
 ─────────────
   Prevent ▸  ✓ Display (-d)
              ✓ Idle (-i)
@@ -50,9 +50,12 @@ Click the cup in the menubar:
   Quit
 ```
 
-**Custom…** takes a whole number of minutes, 1 to 1440 (24 hours). Minutes only
-— no `90m` or `1.5h` — so there is one format to state rather than a set of
-parser rules to guess at.
+**Custom…** accepts `30s`, `45m`, `2h`, `1d`, up to 7 days. A bare number means
+minutes, so `45` and `45m` are the same. Case and spacing don't matter — `2 H`
+works.
+
+Whole numbers only: `1.5h` is rejected because it would have to round somewhere
+you can't see, and `90m` says the same thing without the ambiguity.
 
 **Prevent** maps to `caffeinate`'s own flags. The defaults, display and idle
 sleep, are what "keep awake" means for most uses. Changing them mid-session
