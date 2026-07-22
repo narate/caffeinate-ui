@@ -86,8 +86,10 @@ Changing flags while active terminates and respawns with the new argv.
 
 Two pure functions carry the logic worth testing:
 
-- `caffeinateArgs(flags:watching:) throws -> [String]` — builds argv in a
-  deterministic order. Throws `CaffeineError.noFlagsSelected` on an empty set
+- `caffeinateArgs(flags:watching:) throws -> [String]` — builds argv as flags in
+  fixed `-d -i -m -s` order, then `-w <pid>`. The order is fixed rather than
+  set-iteration order so the tests can assert on exact argv. Throws
+  `CaffeineError.noFlagsSelected` on an empty set
   rather than spawning a `caffeinate` with no flags, which would hold no
   assertion while the UI showed "active".
 - `formatRemaining(_: TimeInterval) -> String` — `59s`, `42m`, `1h 05m`.
@@ -125,7 +127,7 @@ people. `-s` only takes effect on AC power; the submenu item says so.
 ```
 ☕ 42m              title: icon plus countdown, icon-only when idle
 ─────────────
-  Off / Indefinite
+  Indefinite         reads "Turn Off" while active
   15 minutes
   1 hour
   2 hours
