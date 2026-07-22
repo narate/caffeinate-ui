@@ -54,8 +54,13 @@ final class CaffeineController {
     func start(duration: TimeInterval?) throws {
         killChild()
         let until = duration.map { Date().addingTimeInterval($0) }
-        try spawn()
-        state = .active(until: until)
+        do {
+            try spawn()
+            state = .active(until: until)
+        } catch {
+            state = .idle
+            throw error
+        }
     }
 
     func stop() {
@@ -89,10 +94,13 @@ final class CaffeineController {
         child.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
         child.arguments = args
         // If caffeinate dies on its own, fall back to idle so the UI cannot
-        // keep claiming the Mac is being held awake.
+        // keep claiming the Mac is being held awake. Guard on identity, not
+        // nil-ness: this handler belongs to `child`, and by the time it runs
+        // on main, `self.process` may already be a newer child that replaced
+        // it. Only clear state if `child` is still the current process.
         child.terminationHandler = { [weak self] _ in
             DispatchQueue.main.async {
-                guard let self, self.process != nil else { return }
+                guard let self, self.process === child else { return }
                 self.process = nil
                 self.state = .idle
             }
