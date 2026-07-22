@@ -38,6 +38,7 @@ Click the cup in the menubar:
   15 minutes
   1 hour
   2 hours
+  Custom…            prompts for a number of minutes
 ─────────────
   Prevent ▸  ✓ Display (-d)
              ✓ Idle (-i)
@@ -48,6 +49,10 @@ Click the cup in the menubar:
 ─────────────
   Quit
 ```
+
+**Custom…** takes a whole number of minutes, 1 to 1440 (24 hours). Minutes only
+— no `90m` or `1.5h` — so there is one format to state rather than a set of
+parser rules to guess at.
 
 **Prevent** maps to `caffeinate`'s own flags. The defaults, display and idle
 sleep, are what "keep awake" means for most uses. Changing them mid-session

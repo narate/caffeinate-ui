@@ -72,5 +72,21 @@ func runSelfCheck() {
     precondition(formatRemaining(3600) == "1h 00m")
     precondition(formatRemaining(3900) == "1h 05m")
 
+    // parseDurationMinutes: the custom-duration field is user input, so the
+    // rejections matter more than the acceptances.
+    precondition(parseDurationMinutes("45")   == 2700)
+    precondition(parseDurationMinutes(" 45 ") == 2700)   // trimmed
+    precondition(parseDurationMinutes("1")    == 60)     // lower bound
+    precondition(parseDurationMinutes("1440") == 86400)  // upper bound
+    precondition(parseDurationMinutes("1441") == nil)    // past the bound
+    precondition(parseDurationMinutes("0")    == nil)    // a 0s session is not a session
+    precondition(parseDurationMinutes("-5")   == nil)    // would be an already-expired deadline
+    precondition(parseDurationMinutes("")     == nil)
+    precondition(parseDurationMinutes("   ")  == nil)
+    precondition(parseDurationMinutes("abc")  == nil)
+    precondition(parseDurationMinutes("45.5") == nil)    // minutes only, no decimals
+    precondition(parseDurationMinutes("45m")  == nil)    // no unit suffixes
+    precondition(parseDurationMinutes("1e3")  == nil)    // not a shortcut for 1000
+
     print("self-check ok")
 }

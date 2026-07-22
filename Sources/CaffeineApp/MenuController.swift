@@ -10,6 +10,27 @@ func formatRemaining(_ interval: TimeInterval) -> String {
     return String(format: "%dh %02dm", minutes / 60, minutes % 60)
 }
 
+/// Upper bound on a custom duration, in minutes (24 hours).
+///
+/// Bounded because the value becomes a live deadline: an unbounded field turns
+/// a fat-fingered paste into a session that outlives the user's interest in it,
+/// with no way to tell from the menubar that anything is wrong.
+let maxCustomMinutes = 1440
+
+/// Parses a custom-duration entry into a `TimeInterval`, or `nil` if the text is
+/// not a whole number of minutes within `1...maxCustomMinutes`.
+///
+/// Deliberately strict: minutes only, no unit suffixes and no decimals. One
+/// accepted format the field can state plainly beats a lenient parser whose
+/// rules the user has to guess at.
+func parseDurationMinutes(_ text: String) -> TimeInterval? {
+    let trimmed = text.trimmingCharacters(in: .whitespaces)
+    guard let minutes = Int(trimmed), (1...maxCustomMinutes).contains(minutes) else {
+        return nil
+    }
+    return TimeInterval(minutes * 60)
+}
+
 extension SleepFlag {
     var menuTitle: String {
         switch self {
@@ -122,6 +143,12 @@ final class MenuController: NSObject {
             menu.addItem(item)
         }
 
+        let custom = NSMenuItem(title: "Custom…",
+                                action: #selector(selectCustomDuration),
+                                keyEquivalent: "")
+        custom.target = self
+        menu.addItem(custom)
+
         menu.addItem(.separator())
 
         let prevent = NSMenuItem(title: "Prevent", action: nil, keyEquivalent: "")
@@ -199,6 +226,45 @@ final class MenuController: NSObject {
             // onStateChange, which rebuilt this menu with the error row. There
             // is nothing left to do here, and refreshing again would depend on
             // an ordering that is easy to get wrong.
+        }
+    }
+
+    @objc private func selectCustomDuration() {
+        // An .accessory app is not the active app, so without this the panel
+        // opens behind whatever the user is actually looking at.
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "Keep awake for how long?"
+        alert.informativeText = "Whole minutes, 1 to \(maxCustomMinutes)."
+        alert.addButton(withTitle: "Start")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+        field.placeholderString = "45"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        guard let duration = parseDurationMinutes(field.stringValue) else {
+            // Reported here rather than as a menu row: the menu has already
+            // closed by now, so a row would not be seen until the user next
+            // opened it — long after the typo stopped making sense.
+            let invalid = NSAlert()
+            invalid.alertStyle = .warning
+            invalid.messageText = "Not a valid duration"
+            invalid.informativeText =
+                "Enter a whole number of minutes between 1 and \(maxCustomMinutes)."
+            invalid.runModal()
+            return
+        }
+
+        do {
+            try controller.start(duration: duration)
+        } catch {
+            // Already recorded in the controller's lastError, which rebuilt the
+            // menu with the error row — same contract as selectDuration.
         }
     }
 
